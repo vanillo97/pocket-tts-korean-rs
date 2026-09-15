@@ -193,7 +193,79 @@ pub fn synthesize(model: &TTSModel, voice: &ModelState, text: &str) -> Result<Te
     if chunks.is_empty() {
         anyhow::bail!("no audio generated (text too short or invalid)");
     }
-    Ok(Tensor::cat(&chunks, 2)?.squeeze(0)?)
+    let audio = Tensor::cat(&chunks, 2)?.squeeze(0)?;
+    time_stretch(&audio, model.sample_rate, model.speed)
+}
+
+/// 피치 보존 타임스트레치 (WSOLA). `[C, T]` 입력, 길이 약 `T / speed`.
+/// `speed > 1` 빠르게, `< 1` 느리게. 무음(pause)도 같은 비율로 줄어든다.
+pub fn time_stretch(audio: &Tensor, sample_rate: usize, speed: f32) -> Result<Tensor> {
+    if (speed - 1.0).abs() < 1e-3 {
+        return Ok(audio.clone());
+    }
+    anyhow::ensure!(speed > 0.0, "speed must be positive (got {speed})");
+    let chans = audio.to_vec2::<f32>()?;
+    let out: Vec<Vec<f32>> = chans
+        .iter()
+        .map(|c| wsola(c, sample_rate, speed))
+        .collect();
+    let t = out[0].len();
+    let flat: Vec<f32> = out.into_iter().flatten().collect();
+    Ok(Tensor::from_vec(flat, (chans.len(), t), audio.device())?)
+}
+
+/// WSOLA 단일 채널. 30ms 창, 50% 겹침, ±10ms 탐색.
+fn wsola(x: &[f32], sr: usize, speed: f32) -> Vec<f32> {
+    let win = sr * 30 / 1000;
+    let hop = win / 2;
+    let tol = sr * 10 / 1000;
+    if x.len() < win + 2 * tol + hop {
+        return x.to_vec(); // 너무 짧으면 그대로
+    }
+    let w: Vec<f32> = (0..win)
+        .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / win as f32).cos())
+        .collect();
+    let target_len = (x.len() as f32 / speed) as usize;
+    let mut out = vec![0f32; target_len + win];
+    let mut norm = vec![0f32; target_len + win];
+    let mut prev_next = 0usize; // 직전 프레임의 자연스러운 다음 위치(입력 인덱스)
+    let mut k = 0usize;
+    loop {
+        let out_pos = k * hop;
+        let nominal = (out_pos as f32 * speed) as usize;
+        if out_pos + win > out.len() || nominal + win + tol + hop >= x.len() {
+            break;
+        }
+        // ponytail: 탐색 구간 전수 상관계산 O(tol*win). 10초 오디오 ~0.1s. 느리면 4x 다운샘플 탐색.
+        let src = if k == 0 {
+            nominal
+        } else {
+            let target = &x[prev_next..prev_next + win];
+            let lo = nominal.saturating_sub(tol);
+            let (mut best, mut best_c) = (nominal, f32::NEG_INFINITY);
+            for d in lo..=nominal + tol {
+                let c: f32 = x[d..d + win].iter().zip(target).map(|(a, b)| a * b).sum();
+                if c > best_c {
+                    best_c = c;
+                    best = d;
+                }
+            }
+            best
+        };
+        for i in 0..win {
+            out[out_pos + i] += x[src + i] * w[i];
+            norm[out_pos + i] += w[i];
+        }
+        prev_next = src + hop;
+        k += 1;
+    }
+    out.truncate(target_len);
+    for (o, n) in out.iter_mut().zip(&norm) {
+        if *n > 1e-3 {
+            *o /= n;
+        }
+    }
+    out
 }
 
 /// 합성 + wav 저장까지 한 번에. 제품에서 가장 많이 쓰는 진입점.
@@ -245,6 +317,22 @@ mod tests {
     fn local_config_missing_dir() {
         assert!(find_local_config("korean", "/nonexistent_dir_xyz").is_none());
         assert!(find_local_config("korean", "/tmp/empty_models_xyz").is_none());
+    }
+
+    #[test]
+    fn time_stretch_keeps_pitch() -> Result<()> {
+        // 440Hz 1초 → speed 2.0: 길이 절반, 제로크로싱(=피치)은 유지되어야 함.
+        let sr = 24000usize;
+        let sine: Vec<f32> = (0..sr)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin())
+            .collect();
+        let t = Tensor::from_vec(sine, (1, sr), &candle_core::Device::Cpu)?;
+        let y = time_stretch(&t, sr, 2.0)?.to_vec2::<f32>()?.remove(0);
+        assert!((y.len() as i64 - (sr / 2) as i64).abs() < 100, "len {}", y.len());
+        let zc = y.windows(2).filter(|p| (p[0] < 0.0) != (p[1] < 0.0)).count();
+        // 0.5초 동안 440Hz면 ~440 크로싱. 리샘플이면 ~880.
+        assert!((380..=500).contains(&zc), "zero crossings {zc}");
+        Ok(())
     }
 
     #[test]

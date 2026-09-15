@@ -46,6 +46,9 @@ pub struct TTSModel {
     /// first EOS (upstream behavior). Higher values ignore single-frame EOS
     /// spikes that often occur during natural inter-word pauses.
     pub eos_debounce: usize,
+    /// Playback speed factor applied as a post-processing time-stretch
+    /// (pitch-preserving WSOLA). 1.0 = unchanged, 1.5 = faster, 0.8 = slower.
+    pub speed: f32,
     /// Optional override for voice-conditioning Mimi chunk size (in frames).
     /// If `None`, an adaptive heuristic is used.
     pub voice_prompt_chunk_frames: Option<usize>,
@@ -481,6 +484,7 @@ impl TTSModel {
             seed: None,
             extra_frames: 0,
             eos_debounce: 1,
+            speed: 1.0,
             voice_prompt_chunk_frames: None,
             sample_rate: config.mimi.sample_rate,
             dim,
