@@ -146,6 +146,5 @@ let secs = pocket_tts_essential::synthesize_to_wav(&model, "alba", "Hello world!
 
 ## 원본에서 걷어낸 것
 
-`serve`/Web UI·`wasm`/데모, `live_bench`·`onnx-bench`·벤치 루프,
-ONNX 하이브리드, OV 배포 패키지·`test-assets`, Python 바인딩,
+`serve`/Web UI·`wasm`/데모, `test-assets`, Python 바인딩,
 core의 benches/tests/examples. `quantized`/`metal`/`mkl` 피처 선언은 유지.
