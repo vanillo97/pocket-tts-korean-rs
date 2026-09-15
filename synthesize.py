@@ -80,8 +80,54 @@ def resolve_voice(lang: str, voice: str | None, model_dir: str = MODEL_DIR_DEFAU
     return "voice.wav"
 
 
+def apply_speed(audio, speed: float = 1.0):
+    """재생 속도 조절 (피치 보존 SOLA). 모델 재추론 없이 후처리로 동작한다.
+    audio: 1D numpy 배열. 출력 길이 = round(입력 길이 / speed). 범위 0.5~2.0."""
+    import numpy as np
+
+    a = np.asarray(audio, dtype=np.float32).ravel()
+    if abs(speed - 1.0) < 1e-6:
+        return a
+    if not 0.5 <= speed <= 2.0:
+        raise ValueError(f"speed must be in 0.5..=2.0, got {speed}")
+    n = a.size
+    target = max(1, round(n / speed))
+    if n < 2048:  # 짧으면 선형 리샘플 폴백 (피치 변하지만 길이가 무시 가능)
+        pos = np.arange(target) * speed
+        i0 = np.floor(pos).astype(int).clip(0, n - 1)
+        i1 = np.minimum(i0 + 1, n - 1)
+        return (a[i0] * (1 - (pos - i0)) + a[i1] * (pos - i0)).astype(np.float32)
+
+    WIN, HS, TOL = 1024, 256, 128  # TOL < HS: 프레임별 위상 보정만, 드리프트 누적 없음
+    ov = WIN - HS
+    ha = HS * speed  # 입력 공칭 홉
+    fade = np.linspace(0, 1, ov, dtype=np.float32)
+    out = np.zeros(target + WIN, dtype=np.float32)
+    out[:WIN] = a[:WIN]
+    k, nominal = WIN, 0.0
+    while k + HS <= out.size:
+        nominal += ha  # 공칭 위치는 항상 ha씩 (best를 되먹이면 길이가 드리프트한다)
+        c = int(round(nominal))
+        lo, hi = max(0, c - TOL), min(n - WIN, c + TOL)
+        if hi <= lo:
+            break
+        # 출력 꼬리와의 정규화 상호상관이 최대인 지점에 프레임을 맞춘다.
+        tail = out[k - ov:k]
+        cand = np.lib.stride_tricks.sliding_window_view(a[lo:hi + ov], ov)[:hi - lo + 1]
+        best = lo + int(np.argmax(cand @ tail / (np.linalg.norm(cand, axis=1) + 1e-9)))
+        frame = a[best:best + WIN]
+        out[k - ov:k] = out[k - ov:k] * (1 - fade) + frame[:ov] * fade
+        out[k:k + HS] = frame[ov:]
+        k += HS
+    out = out[:target]
+    f = min(128, target)  # 잘린 끝단 클릭 방지
+    out[target - f:] *= np.linspace(1, 0, f, dtype=np.float32)
+    return out
+
+
 def synthesize(lang: str, text: str, voice: str, out: str, threads: int = 8,
-               quantize: bool = True, seed: int = 0, config: str | None = None) -> dict:
+               quantize: bool = True, seed: int = 0, config: str | None = None,
+               speed: float = 1.0) -> dict:
     import torch
     import scipy.io.wavfile
     from pocket_tts import TTSModel
@@ -105,8 +151,10 @@ def synthesize(lang: str, text: str, voice: str, out: str, threads: int = 8,
     audio = model.generate_audio(vs, text, copy_state=True)
     gen = time.perf_counter() - t0
 
-    secs = audio.numel() / sr
-    scipy.io.wavfile.write(out, sr, audio.detach().cpu().numpy())
+    wav = audio.detach().cpu().float().numpy().ravel()
+    wav = apply_speed(wav, speed)
+    secs = wav.size / sr
+    scipy.io.wavfile.write(out, sr, wav)
     return {"out": out, "audio_s": round(secs, 2), "gen_s": round(gen, 3),
             "speed_x": round(secs / gen, 2), "rtf": round(gen / secs, 4)}
 
@@ -125,6 +173,8 @@ def main() -> None:
                     help="커스텀 yaml (로컬 경로 또는 hf:// URL). 지정 시 자동 선택 대신 사용")
     ap.add_argument("--model-dir", default=MODEL_DIR_DEFAULT,
                     help="로컬 모델 폴더 (default: models). 없으면 HF 자동 다운로드")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="재생 속도 배율 (1.0 원본, >1 빠름, <1 느림; 피치 보존, 0.5~2.0)")
     a = ap.parse_args()
 
     config, source = resolve_model(a.lang, a.model_dir, a.config)
@@ -134,7 +184,7 @@ def main() -> None:
         raise SystemExit(f"voice not found: {voice}")
     r = synthesize(a.lang, a.text or DEFAULT_TEXT[a.lang], voice, a.out,
                    threads=a.threads, quantize=not a.no_quant, seed=a.seed,
-                   config=config)
+                   config=config, speed=a.speed)
     print(f"saved {r['out']} ({r['audio_s']}s audio, gen {r['gen_s']}s, "
           f"{r['speed_x']}x, RTF {r['rtf']})")
 

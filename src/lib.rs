@@ -185,7 +185,21 @@ pub fn find_local_config(lang: &str, model_dir: &str) -> Option<std::path::PathB
 
 /// 텍스트 한 건 합성. 긴 입력(문장 다수)은 내부에서 청킹 처리된다.
 /// 반환: `[1, C, T]` 오디오 텐서. 재현이 필요하면 호출 전 `model.seed = Some(n)`.
+///
+/// `speed`는 재생 속도 배율 (1.0 = 원본, >1 빠름, <1 느림).
+/// 피치 보존 시간-늘림(`apply_speed`)으로 후처리하므로 모델 재추론 없이 동작한다.
+/// 허용 범위 `0.5..=2.0` 밖이면 에러.
 pub fn synthesize(model: &TTSModel, voice: &ModelState, text: &str) -> Result<Tensor> {
+    synthesize_with_speed(model, voice, text, 1.0)
+}
+
+/// `speed` 지정 합성 (`synthesize`의 속도 조절판).
+pub fn synthesize_with_speed(
+    model: &TTSModel,
+    voice: &ModelState,
+    text: &str,
+    speed: f32,
+) -> Result<Tensor> {
     let mut chunks = Vec::new();
     for r in model.generate_stream_long(text, voice) {
         chunks.push(r?);
@@ -193,7 +207,262 @@ pub fn synthesize(model: &TTSModel, voice: &ModelState, text: &str) -> Result<Te
     if chunks.is_empty() {
         anyhow::bail!("no audio generated (text too short or invalid)");
     }
-    Ok(Tensor::cat(&chunks, 2)?.squeeze(0)?)
+    let audio = Tensor::cat(&chunks, 2)?.squeeze(0)?;
+    apply_speed(&audio, speed, model.sample_rate)
+}
+
+/// 재생 속도 조절 (TD-PSOLA-lite, 무의존성).
+/// - `speed == 1.0`: 그대로 반환 (clone)
+/// - `speed > 1`: 짧아짐, `speed < 1`: 길어짐. 출력 길이 = 입력 길이 / speed (정확).
+/// - 피치 주기 단위로 복사/건너뛰므로 피치 보존. 무성음은 10ms 고정 프레임.
+/// - 모노 믹스로 피치마크를 구해 전 채널에 동일 적용 (위상 보존).
+// ponytail: 고정 분석창(30ms/10ms). 정교한 피치 추적 필요하면 외부 크레이트로 교체.
+pub fn apply_speed(audio: &Tensor, speed: f32, sample_rate: usize) -> Result<Tensor> {
+    if !(0.5..=2.0).contains(&speed) {
+        anyhow::bail!("speed must be in 0.5..=2.0, got {speed}");
+    }
+    if (speed - 1.0).abs() < 1e-6 {
+        return Ok(audio.clone());
+    }
+    let shape = audio.dims().to_vec();
+    // [C, T] 또는 [T] 정규화 → Vec<Vec<f32>>
+    let (chans, mono_mix): (Vec<Vec<f32>>, Vec<f32>) = match shape.as_slice() {
+        [_, _] => {
+            let v = audio.to_vec2::<f32>()?;
+            let n = v[0].len();
+            if n < 2048 {
+                return resample_naive(audio, speed);
+            }
+            let mut mix = vec![0.0f32; n];
+            for ch in &v {
+                for (i, s) in ch.iter().enumerate() {
+                    mix[i] += *s;
+                }
+            }
+            let inv = 1.0 / v.len() as f32;
+            for s in mix.iter_mut() {
+                *s *= inv;
+            }
+            (v, mix)
+        }
+        [t] => {
+            let v = audio.to_vec1::<f32>()?;
+            if *t < 2048 {
+                return resample_naive(audio, speed);
+            }
+            (vec![v.clone()], v)
+        }
+        _ => anyhow::bail!("expected audio tensor [C, T] or [T], got {shape:?}"),
+    };
+
+    let sr = sample_rate.max(1000);
+    let win = (sr * 30 / 1000).max(64); // 피치 분석창 30ms
+    let hop = (sr * 10 / 1000).max(16); // 분석 홉 10ms
+    let min_p = (sr / 500).max(8); // 500Hz
+    let max_p = (sr / 50).max(min_p + 1); // 50Hz
+    let uv_span = (sr * 10 / 1000).max(16); // 무성음 고정 프레임 10ms
+    let n = mono_mix.len();
+
+    // 1. 프레임별 주기 추정 (0 = 무성음). 낮은 lag부터 임계값(0.5) 초과 지점 채택.
+    let mut centers: Vec<(usize, usize)> = Vec::new(); // (center, period)
+    if n > win + 2 * max_p {
+        let mut c = max_p + win / 2;
+        let end = n - win / 2 - max_p;
+        while c <= end {
+            let w0 = c - win / 2;
+            let mut e0 = 0.0f32;
+            for i in 0..win {
+                e0 += mono_mix[w0 + i] * mono_mix[w0 + i];
+            }
+            let mut period = 0usize;
+            if e0 > 1e-12 {
+                let mut lag = min_p;
+                while lag <= max_p {
+                    let mut dot = 0.0f32;
+                    let mut e1 = 0.0f32;
+                    for i in 0..win {
+                        let b = mono_mix[w0 + i + lag];
+                        dot += mono_mix[w0 + i] * b;
+                        e1 += b * b;
+                    }
+                    if dot / (e0 * e1).sqrt() >= 0.5 {
+                        period = lag;
+                        break;
+                    }
+                    lag += 1;
+                }
+            }
+            centers.push((c, period));
+            c += hop;
+        }
+    }
+    let period_at = |pos: usize| -> usize {
+        if centers.is_empty() {
+            return 0;
+        }
+        let mut bi = 0;
+        let mut bd = usize::MAX;
+        for (i, (cw, _)) in centers.iter().enumerate() {
+            let d = cw.abs_diff(pos);
+            if d < bd {
+                bd = d;
+                bi = i;
+            }
+        }
+        centers[bi].1
+    };
+
+    // 2. 피치마크: 주기 간격 전진 + 성대 펄스(국소 최대)에 스냅.
+    let mut marks: Vec<usize> = vec![0];
+    for _ in 0..(n / 8 + 64) {
+        let pos = *marks.last().unwrap();
+        if pos >= n {
+            break;
+        }
+        let p = period_at(pos);
+        let next = if p == 0 {
+            pos + uv_span
+        } else {
+            // 스냅은 이웃 마크 중간을 넘지 않게 (단조성 보장)
+            let r = (p / 4).max(1);
+            let prev = marks.len().checked_sub(2).map(|i| marks[i]).unwrap_or(0);
+            let lo = (prev + pos) / 2 + 1;
+            let hi = (pos + r).min(n.saturating_sub(1));
+            let mut mi = pos;
+            if hi > lo && hi > pos.saturating_sub(r) {
+                let s0 = lo.max(pos.saturating_sub(r));
+                let mut mv = f32::NEG_INFINITY;
+                for i in s0..=hi {
+                    let v = mono_mix[i].abs();
+                    if v > mv {
+                        mv = v;
+                        mi = i;
+                    }
+                }
+            }
+            mi + p
+        };
+        if next <= pos || next >= n + max_p {
+            break;
+        }
+        marks.push(next.min(n));
+        if *marks.last().unwrap() >= n {
+            break;
+        }
+    }
+    if *marks.last().unwrap() < n {
+        marks.push(n);
+    }
+
+    // 3. 합성: 입력 시간은 speed배速으로 걷고, 출력은 동일 주기로 쌓기.
+    let target = ((n as f32) / speed).round().max(1.0) as usize;
+    let spans: Vec<usize> = marks
+        .windows(2)
+        .map(|w| (w[1] - w[0]).max(8))
+        .collect();
+    let max_span = spans.iter().copied().max().unwrap_or(uv_span);
+    let mut outs: Vec<Vec<f32>> = chans
+        .iter()
+        .map(|_| vec![0.0f32; target + 2 * max_span + 8])
+        .collect();
+    let mut synth = spans.first().copied().unwrap_or(uv_span); // 첫 마크 중심
+    let mut input_t = 0.0f32;
+    let mut j = 0usize;
+    let mut filled = 0usize;
+    for _ in 0..(marks.len() * 2 + 16) {
+        if j >= spans.len() || input_t >= n as f32 {
+            break;
+        }
+        while j + 1 < spans.len() && (marks[j + 1] as f32) <= input_t {
+            j += 1;
+        }
+        let s = spans[j];
+        let m = marks[j].min(n);
+        // Hann(2s+1) 윈도우 overlap-add (50% COLA → 진폭 보존)
+        for k in 0..=2 * s {
+            let si = m as i64 - s as i64 + k as i64;
+            let oi = synth as i64 - s as i64 + k as i64;
+            if si < 0 || si >= n as i64 || oi < 0 || oi >= outs[0].len() as i64 {
+                continue;
+            }
+            let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * k as f32 / (2 * s) as f32).cos();
+            for (ch_idx, ch) in chans.iter().enumerate() {
+                outs[ch_idx][oi as usize] += ch[si as usize] * w;
+            }
+        }
+        filled = filled.max(synth + s);
+        synth += s;
+        input_t += s as f32 * speed;
+    }
+
+    // 4. 길이를 target에 정확히 맞추기 (128샘플 페이드아웃 후 자르기/0패딩).
+    let fade = 128.min(target).min(filled);
+    for out in outs.iter_mut() {
+        let l = filled.min(target);
+        if fade > 0 && l >= fade {
+            for i in 0..fade {
+                out[l - fade + i] *= (fade - i) as f32 / fade as f32;
+            }
+        }
+        out.truncate(target);
+        if out.len() < target {
+            out.resize(target, 0.0);
+        }
+    }
+
+    let device = audio.device();
+    match shape.as_slice() {
+        [c, _] => {
+            let t = outs[0].len();
+            let mut flat = Vec::with_capacity(c * t);
+            for ch in outs {
+                flat.extend(ch);
+            }
+            Ok(Tensor::from_vec(flat, (*c, t), device)?)
+        }
+        [_] => {
+            let t = outs[0].len();
+            Ok(Tensor::from_vec(std::mem::take(&mut outs[0]), t, device)?)
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// 짧은 오디오(<2048 샘플)용 선형 리샘플 폴백.
+fn resample_naive(audio: &Tensor, speed: f32) -> Result<Tensor> {
+    let shape = audio.dims().to_vec();
+    let device = audio.device().clone();
+    match shape.as_slice() {
+        [c, t] => {
+            let v = audio.to_vec2::<f32>()?;
+            let out_len = ((*t as f32) / speed).round().max(1.0) as usize;
+            let mut out = Vec::with_capacity(c * out_len);
+            for ch in &v {
+                for i in 0..out_len {
+                    let pos = i as f32 * speed;
+                    let i0 = pos.floor() as usize;
+                    let frac = pos - i0 as f32;
+                    let s0 = ch[i0.min(*t - 1)];
+                    let s1 = ch[(i0 + 1).min(*t - 1)];
+                    out.push(s0 * (1.0 - frac) + s1 * frac);
+                }
+            }
+            Ok(Tensor::from_vec(out, (*c, out_len), &device)?)
+        }
+        [t] => {
+            let v = audio.to_vec1::<f32>()?;
+            let out_len = ((*t as f32) / speed).round().max(1.0) as usize;
+            let mut out = Vec::with_capacity(out_len);
+            for i in 0..out_len {
+                let pos = i as f32 * speed;
+                let i0 = pos.floor() as usize;
+                let frac = pos - i0 as f32;
+                out.push(v[i0.min(*t - 1)] * (1.0 - frac) + v[(i0 + 1).min(*t - 1)] * frac);
+            }
+            Ok(Tensor::from_vec(out, out_len, &device)?)
+        }
+        _ => anyhow::bail!("expected audio tensor [C, T] or [T], got {shape:?}"),
+    }
 }
 
 /// 합성 + wav 저장까지 한 번에. 제품에서 가장 많이 쓰는 진입점.
@@ -208,6 +477,7 @@ pub fn synthesize_to_wav(
 }
 
 /// `model_dir`를 함께 보는 `synthesize_to_wav` (stock voice 로컬 우선).
+/// `speed`: 1.0 = 원본 속도 (자세한 건 `apply_speed` 참조).
 pub fn synthesize_to_wav_in(
     model: &TTSModel,
     voice_spec: &str,
@@ -215,8 +485,20 @@ pub fn synthesize_to_wav_in(
     out_wav: &str,
     model_dir: Option<&str>,
 ) -> Result<f32> {
+    synthesize_to_wav_in_with_speed(model, voice_spec, text, out_wav, model_dir, 1.0)
+}
+
+/// `synthesize_to_wav_in`의 속도 조절판.
+pub fn synthesize_to_wav_in_with_speed(
+    model: &TTSModel,
+    voice_spec: &str,
+    text: &str,
+    out_wav: &str,
+    model_dir: Option<&str>,
+    speed: f32,
+) -> Result<f32> {
     let voice = resolve_voice_in(model, voice_spec, model_dir)?;
-    let audio = synthesize(model, &voice, text)?;
+    let audio = synthesize_with_speed(model, &voice, text, speed)?;
     let secs = audio_len_secs(&audio, model.sample_rate);
     pocket_tts::audio::write_wav(out_wav, &audio, model.sample_rate as u32)?;
     Ok(secs)
@@ -255,5 +537,48 @@ mod tests {
                 .expect("models/{lang}.local.yaml bundle");
             assert!(p.ends_with(format!("{lang}.local.yaml")));
         }
+    }
+
+    #[test]
+    fn speed_scales_duration() {
+        use candle_core::Device;
+        use std::f32::consts::PI;
+        let device = Device::Cpu;
+        // 2초 음성 유사 신호 24kHz: 5ms마다 바뀌는 F0(유성음) + 무성음 잡음 버스트 +
+        // 음절 게이팅. 프레임 단위로 예측 불가해야 WSOLA가 nominal 홉을 추종한다.
+        // (구간 정상 톤은 NCC≈1 위상고정에 빠져 길이가 1.0으로 수렴하는 병리 케이스)
+        let n = 48000;
+        let sr = 24000.0f32;
+        let micro = 120usize; // 5ms
+        let hash = |x: usize| ((x.wrapping_mul(2654435761) >> 8) % 1000) as f32 / 1000.0;
+        let mut lcg: u32 = 0x12345678;
+        let mut phase = 0.0f32;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f32 / sr;
+            let mb = i / micro;
+            let gate = (2.0 * PI * 3.7 * t).sin().max(0.0).powf(1.2);
+            lcg = lcg.wrapping_mul(1103515245).wrapping_add(12345);
+            let nz = ((lcg >> 16) & 0x7fff) as f32 / 32768.0 - 0.5;
+            let x = if mb % 9 == 8 {
+                nz * 0.5 // 무성음 버스트
+            } else {
+                let f0 = 90.0 + hash(mb) * 160.0;
+                phase += 2.0 * PI * f0 / sr;
+                phase.sin() * 0.5 + (2.0 * phase).sin() * 0.25 + nz * 0.15
+            };
+            data.push(gate * x * (0.6 + 0.4 * hash(mb / 7)));
+        }
+        let t = Tensor::from_vec(data, (1, n), &device).unwrap();
+        for (speed, expect_ratio) in [(2.0, 0.5), (0.5, 2.0), (1.5, 1.0 / 1.5), (1.0, 1.0)] {
+            let out = apply_speed(&t, speed, 24000).unwrap();
+            let got = out.dims()[1] as f32 / n as f32;
+            assert!(
+                (got - expect_ratio).abs() < 0.02,
+                "speed {speed}: ratio {got}, want ~{expect_ratio}"
+            );
+        }
+        assert!(apply_speed(&t, 0.1, 24000).is_err());
+        assert!(apply_speed(&t, 3.0, 24000).is_err());
     }
 }

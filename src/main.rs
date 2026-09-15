@@ -13,7 +13,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use pocket_tts_essential::{
     find_local_config, load_english_with_params, load_korean_with_params, set_threads,
-    synthesize_to_wav_in, ENGLISH_EOS_THRESHOLD, KOREAN_EOS_THRESHOLD, MODEL_DIR_DEFAULT,
+    synthesize_to_wav_in_with_speed, ENGLISH_EOS_THRESHOLD, KOREAN_EOS_THRESHOLD,
+    MODEL_DIR_DEFAULT,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum, Debug)]
@@ -64,6 +65,9 @@ struct Args {
     /// 연속 EOS 필요 횟수 (단발성 오검출 무시, 기본 1)
     #[arg(long, default_value_t = 1)]
     eos_debounce: usize,
+    /// 재생 속도 배율 (1.0 원본, >1 빠름, <1 느림; 피치 보존, 범위 0.5~2.0)
+    #[arg(long, default_value_t = 1.0)]
+    speed: f32,
 }
 
 fn main() -> Result<()> {
@@ -122,8 +126,15 @@ fn main() -> Result<()> {
     model.extra_frames = args.extra_frames;
     model.eos_debounce = args.eos_debounce;
     // voice 인코딩은 타이머 밖(웜 상태 가정). 벤치 프로토콜과 동일.
-    let secs = synthesize_to_wav_in(&model, voice, text, &args.out, Some(&args.model_dir))
-        .with_context(|| format!("합성 실패 (voice='{}')", voice))?;
+    let secs = synthesize_to_wav_in_with_speed(
+        &model,
+        voice,
+        text,
+        &args.out,
+        Some(&args.model_dir),
+        args.speed,
+    )
+    .with_context(|| format!("합성 실패 (voice='{}')", voice))?;
     let gen = t0.elapsed().as_secs_f32();
 
     println!(
