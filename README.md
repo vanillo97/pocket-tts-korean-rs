@@ -81,7 +81,9 @@ cargo run --release -- --lang ko --config models/korean.local.yaml \
 ## 사용법
 
 화자 음성 `voice.wav` (10초 이내, 본인 동의 음성만)를 이 폴더에 준비한다.
-영어는 stock voice 이름(`alba`, `marius`, `javert`, `jean`, `fantine`,
+앞뒤 무음을 자르고 6~10초 낭독 구간만 쓰는 것을 권장한다.
+28초 같은 긴 원본을 그대로 쓰면 원본의 휴지 패턴을 따라가
+문장 중간에 멈추는(false EOS) 경우가 있다. 영어는 stock voice 이름(`alba`, `marius`, `javert`, `jean`, `fantine`,
 `cosette`, `eponine`, `azelma`)도 바로 쓸 수 있다. stock 임베딩은 신모델용
 `languages/english/embeddings/*.safetensors`를 쓴다.
 
@@ -122,6 +124,8 @@ let secs = pocket_tts_essential::synthesize_to_wav(&model, "alba", "Hello world!
 - 입력 10초 분량 초과 시 `ScatterElementsUpdate` 실패 → 문장 단위로 나눠서 호출.
 - `ctx 256 / mimi 128 latents` 한도.
 - `--voice`: stock 이름(영어 8종), `.wav`(Mimi 인코딩), `.safetensors`(임베딩) 지원.
+- 중간에 끊기면 `--eos-debounce 3` → `--extra-frames 20` → `--seed` 변경 순으로 시도.
+  그래도 안 되면 화자 wav 구간을 바꿀 것 (휴지가 긴 구간은 false EOS 유발).
 - 본인 동의 음성만 사용. 출력 24kHz wav.
 
 ## 원본에서 걷어낸 것

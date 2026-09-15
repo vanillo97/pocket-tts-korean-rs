@@ -39,6 +39,13 @@ pub struct TTSModel {
     /// `None` (default) samples from OS entropy. Mirrors the
     /// `torch.manual_seed(i)` protocol of run_live_benchmark.py.
     pub seed: Option<u64>,
+    /// Extra frames to generate past the normal EOS stop point (diagnostic /
+    /// recovery for premature EOS). 0 = default behavior.
+    pub extra_frames: usize,
+    /// Consecutive EOS signals required before stopping. 1 = stop at the
+    /// first EOS (upstream behavior). Higher values ignore single-frame EOS
+    /// spikes that often occur during natural inter-word pauses.
+    pub eos_debounce: usize,
     /// Optional override for voice-conditioning Mimi chunk size (in frames).
     /// If `None`, an adaptive heuristic is used.
     pub voice_prompt_chunk_frames: Option<usize>,
@@ -472,6 +479,8 @@ impl TTSModel {
             eos_threshold,
             noise_clamp,
             seed: None,
+            extra_frames: 0,
+            eos_debounce: 1,
             voice_prompt_chunk_frames: None,
             sample_rate: config.mimi.sample_rate,
             dim,
@@ -1072,6 +1081,7 @@ impl TTSModel {
         };
 
         let mut eos_step: Option<usize> = None;
+        let mut eos_hits: usize = 0;
         let mut finished = false;
 
         // We need to move 'self' (reference) and owned data into the closure
@@ -1151,12 +1161,20 @@ impl TTSModel {
                 Err(e) => return Some(Err(e)),
             };
 
-            if is_eos && eos_step.is_none() {
-                eos_step = Some(step);
+            // Debounced EOS: only accept EOS after `eos_debounce` consecutive
+            // EOS frames, so a momentary spike during an inter-word pause
+            // doesn't truncate the utterance.
+            if is_eos {
+                eos_hits += 1;
+                if eos_step.is_none() && eos_hits >= model.eos_debounce.max(1) {
+                    eos_step = Some(step);
+                }
+            } else {
+                eos_hits = 0;
             }
 
             if let Some(e_step) = eos_step
-                && step >= e_step + frames_after_eos
+                && step >= e_step + frames_after_eos + model.extra_frames
             {
                 finished = true;
             }

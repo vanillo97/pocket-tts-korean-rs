@@ -61,6 +61,17 @@ pub fn set_threads(n: usize) {
 /// 한국어 모델 로드. `config=None`이면 바이너리에 번들된 `korean` variant 사용.
 /// `temp=None`이면 yaml의 `default_temperature`(0.3) 사용.
 pub fn load_korean(config: Option<&str>) -> Result<TTSModel> {
+    load_korean_with_params(config, None, KOREAN_EOS_THRESHOLD)
+}
+
+/// 한국어 모델 로드 (파라미터 오버라이드).
+/// - `temp=None`이면 yaml의 `default_temperature` 사용
+/// - `eos_threshold`가 낮을수록(더 음수) 길게 생성 (기본 -4.0, 잘리면 -6~-10 시도)
+pub fn load_korean_with_params(
+    config: Option<&str>,
+    temp: Option<f32>,
+    eos_threshold: f32,
+) -> Result<TTSModel> {
     let cfg = if let Some(c) = config {
         let p = download_if_necessary(c)?;
         load_config(&p)?
@@ -70,9 +81,9 @@ pub fn load_korean(config: Option<&str>) -> Result<TTSModel> {
     };
     TTSModel::load_from_config(
         cfg,
-        None,
+        temp,
         KOREAN_LSD_STEPS,
-        KOREAN_EOS_THRESHOLD,
+        eos_threshold,
         None,
         &candle_core::Device::Cpu,
     )
@@ -82,6 +93,15 @@ pub fn load_korean(config: Option<&str>) -> Result<TTSModel> {
 /// yaml의 `default_temperature`(0.3)가 적용된다.
 /// gated 가중치라 `HF_TOKEN` 환경변수 + HF 이용약관 동의가 필요하다.
 pub fn load_english(config: Option<&str>) -> Result<TTSModel> {
+    load_english_with_params(config, None, ENGLISH_EOS_THRESHOLD)
+}
+
+/// 영어 모델 로드 (파라미터 오버라이드).
+pub fn load_english_with_params(
+    config: Option<&str>,
+    temp: Option<f32>,
+    eos_threshold: f32,
+) -> Result<TTSModel> {
     let cfg = if let Some(c) = config {
         let p = download_if_necessary(c)?;
         load_config(&p)?
@@ -91,9 +111,9 @@ pub fn load_english(config: Option<&str>) -> Result<TTSModel> {
     };
     TTSModel::load_from_config(
         cfg,
-        None,
+        temp,
         ENGLISH_LSD_STEPS,
-        ENGLISH_EOS_THRESHOLD,
+        eos_threshold,
         None,
         &candle_core::Device::Cpu,
     )

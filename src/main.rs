@@ -12,8 +12,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use pocket_tts_essential::{
-    find_local_config, load_english, load_korean, set_threads, synthesize_to_wav_in,
-    MODEL_DIR_DEFAULT,
+    find_local_config, load_english_with_params, load_korean_with_params, set_threads,
+    synthesize_to_wav_in, ENGLISH_EOS_THRESHOLD, KOREAN_EOS_THRESHOLD, MODEL_DIR_DEFAULT,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum, Debug)]
@@ -52,6 +52,18 @@ struct Args {
     /// 재현용 시드 (고정 시 동일 wav)
     #[arg(long, default_value_t = 0)]
     seed: u64,
+    /// 샘플링 온도 (높을수록 다양, 생략 시 yaml 기본값 0.3)
+    #[arg(long, allow_negative_numbers = true)]
+    temperature: Option<f32>,
+    /// EOS 임계값 (더 음수일수록 길게 생성, 잘리면 -6~-10 시도)
+    #[arg(long, allow_negative_numbers = true)]
+    eos_threshold: Option<f32>,
+    /// EOS 이후 추가로 생성할 프레임 (조기종료 진단/복구용, 12.5프레임=1초)
+    #[arg(long, default_value_t = 0)]
+    extra_frames: usize,
+    /// 연속 EOS 필요 횟수 (단발성 오검출 무시, 기본 1)
+    #[arg(long, default_value_t = 1)]
+    eos_debounce: usize,
 }
 
 fn main() -> Result<()> {
@@ -91,12 +103,24 @@ fn main() -> Result<()> {
         .as_deref()
         .or_else(|| local.as_ref().and_then(|p| p.to_str()));
     let mut model = match args.lang {
-        Lang::Ko => load_korean(cfg_override).context("한국어 모델 로드 실패")?,
-        Lang::En => load_english(cfg_override).context(
+        Lang::Ko => load_korean_with_params(
+            cfg_override,
+            args.temperature,
+            args.eos_threshold.unwrap_or(KOREAN_EOS_THRESHOLD),
+        )
+        .context("한국어 모델 로드 실패")?,
+        Lang::En => load_english_with_params(
+            cfg_override,
+            args.temperature,
+            args.eos_threshold.unwrap_or(ENGLISH_EOS_THRESHOLD),
+        )
+        .context(
             "영어 모델 로드 실패 (gated 가중치: HF_TOKEN 환경변수 + HF 이용약관 동의 확인)",
         )?,
     };
     model.seed = Some(args.seed);
+    model.extra_frames = args.extra_frames;
+    model.eos_debounce = args.eos_debounce;
     // voice 인코딩은 타이머 밖(웜 상태 가정). 벤치 프로토콜과 동일.
     let secs = synthesize_to_wav_in(&model, voice, text, &args.out, Some(&args.model_dir))
         .with_context(|| format!("합성 실패 (voice='{}')", voice))?;
