@@ -1,0 +1,31 @@
+# Rust build
+/target/
+**/target/
+
+# 모델 가중치 (1.5GB) — 커밋 제외, fetch_models.py / 첫 실행 자동 다운로드로 복원
+models/*.safetensors
+# 하드링크 잔재 방지
+*.safetensors
+!libs/**/test-assets/**
+
+# 생성물
+out*.wav
+output*.wav
+*.wav
+!**/test-assets/**/*.wav
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# HF cache
+.huggingface/
+*.bin
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp

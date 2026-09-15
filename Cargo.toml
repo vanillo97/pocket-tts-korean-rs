@@ -1,0 +1,23 @@
+[package]
+name = "pocket-tts-essential"
+version = "0.1.0"
+edition = "2021"
+description = "Pocket-TTS Korean synthesis — minimal product code (candle, CPU, standalone)"
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[[bin]]
+name = "tts"
+path = "src/main.rs"
+
+[lib]
+name = "pocket_tts_essential"
+path = "src/lib.rs"
+
+[dependencies]
+pocket-tts = { path = "libs/pocket-tts" }
+candle-core = "0.9.1"
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+hound = "3.5"

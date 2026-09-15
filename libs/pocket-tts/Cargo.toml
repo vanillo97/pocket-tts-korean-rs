@@ -1,0 +1,61 @@
+[package]
+name = "pocket-tts"
+version = "0.6.2"
+edition = "2024"
+authors = ["Pocket TTS Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/babybirdprd/pocket-tts"
+description = "High-performance CPU-based Text-to-Speech library using Candle (vendored core for pocket-tts-essential)"
+keywords = ["tts", "candle", "speech-synthesis", "audio"]
+categories = ["multimedia::audio", "science"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+mkl = ["candle-core/mkl", "candle-nn/mkl"]
+quantized = []
+# WASM is handled by target, not feature flag - candle-core auto-detects wasm32 target
+wasm = []
+metal = ["candle-core/metal", "candle-nn/metal"]
+
+[dependencies]
+candle-core = "0.9.1"
+candle-nn = "0.9.1"
+candle-transformers = "0.9.1"
+safetensors = "0.5.2"
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+byteorder = "1.5"
+tokenizers = { version = "0.21.0", default-features = false, features = ["fancy-regex"] }
+lenient_semver = "0.4.2"
+rubato = "0.14.1"
+regex = "1"
+hound = "3.5"
+rand = "0.8"
+rand_distr = "0.4"
+rayon = "1.11.0"
+tracing = "0.1"
+
+# Dependencies for all non-WASM targets
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+hf-hub = "0.4.3"
+memmap2 = "0.9"
+# sentencepiece removed - causes protobuf conflict with onnxruntime
+# Using tokenizers crate's built-in SentencePiece support instead
+tokenizers = { version = "0.21.0", default-features = false, features = ["onig", "progressbar", "http"] }
+intel-mkl-src = { version = "0.8.1", features = ["mkl-static-lp64-iomp"] }
+
+# WASM-specific dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1"
