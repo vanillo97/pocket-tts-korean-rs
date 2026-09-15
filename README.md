@@ -3,10 +3,7 @@
 > Forked from [babybirdprd/pocket-tts](https://github.com/babybirdprd/pocket-tts)
 > (itself a Rust/Candle port of [kyutai-labs/pocket-tts](https://github.com/kyutai-labs/pocket-tts)).
 > 한국어(24L teacher) 지원을 추가한 변형이다. MIT License — `LICENSE` 참조.
-
-이 폴더만 복사해도 빌드·실행된다. 원본(`babybirdprd/pocket-tts` 포크) 바깥을
-참조하는 path 의존·상대경로가 없다. 추론 코어는 `libs/pocket-tts`에 벤더링했고,
-서버·Web UI·WASM·벤치·ONNX/OV 하네스는 걷어냈다.
+원본(`babybirdprd/pocket-tts` 포크) 외부를 참조하는 path 의존·상대경로가 없어서 이 폴더만 복사해도 빌드, 실행 가능하다. 추론 코어는 `libs/pocket-tts`에 벤더링했고, 서버·Web UI·WASM·벤치는 걷어냈다.
 
 - 한국어: `seastar105/pocket-tts-korean-300m` (bundled `korean` 24L, temp 0.3, 토큰 불필요)
 - 영어: `kyutai/pocket-tts` 신모델 (bundled `english` 6L, temp 0.3,
