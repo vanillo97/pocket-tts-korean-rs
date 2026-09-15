@@ -87,6 +87,22 @@ cargo run --release -- --lang ko --config models/korean.local.yaml \
 `cosette`, `eponine`, `azelma`)도 바로 쓸 수 있다. stock 임베딩은 신모델용
 `languages/english/embeddings/*.safetensors`를 쓴다.
 
+### 화자 임베딩 미리 만들기 (`make_voice.py`)
+
+wav를 `--voice`용 `.safetensors`(`audio_prompt` 잠재)로 변환한다.
+28초 스테레오 원본 10.9MB → keep 1.4MB / trim 1.3MB 수준으로 줄고,
+합성 시작 시 Mimi 인코딩을 생략하므로 로딩도 빨라진다.
+임베딩은 만든 모델(한/영)에서만 쓴다.
+
+```bash
+# 1) 원본 휴지 패턴 그대로
+python make_voice.py --in voice_raw.wav --out voice.keep.safetensors --mode keep
+# 2) 앞뒤 무음 제거 + 긴 내부 휴지 압축 (권장, --max-pause 초 단위)
+python make_voice.py --in voice_raw.wav --out voice.trim.safetensors --mode trim
+cargo run --release -- --lang ko --voice voice.trim.safetensors \
+  --text "안녕하세요." --out out.wav
+```
+
 ### A. Python (가장 빠름, 권장)
 
 ```bash
