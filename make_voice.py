@@ -11,6 +11,8 @@ Mimi 인코딩을 미리 해 두므로 합성 시작도 빨라진다.
     python make_voice.py --in voice_raw.wav --out voice.keep.safetensors --mode keep
     # 2) 앞뒤 무음 제거 + 긴 내부 휴지 압축 (권장)
     python make_voice.py --in voice_raw.wav --out voice.trim.safetensors --mode trim
+    # 3) 길이 상한까지 (5~10초 권장). 단어 중간이 아니라 휴지에서 끊는다
+    python make_voice.py --in voice_raw.wav --out voice.10s.safetensors --max-seconds 10
 
     cargo run --release -- --lang ko --voice voice.trim.safetensors \
       --text "안녕하세요." --out out.wav
@@ -22,7 +24,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from synthesize import resolve_model  # noqa: E402
+from synthesize import KOREAN_CONFIG, resolve_model  # noqa: E402
 
 SAMPLE_RATE = 24000
 
@@ -91,6 +93,24 @@ def cap_pauses(a, max_pause_s: float = 0.4, thresh_db: float = -40.0):
     return removed / SAMPLE_RATE, np.concatenate(out)
 
 
+def cap_length(a, max_s: float, thresh_db: float = -40.0):
+    """앞에서부터 max_s 초까지만 남긴다.
+
+    단어 중간이 잘리면 프롬프트 끝에 파열음 조각이 남으므로, 목표 직전의
+    마지막 '발화→무음' 전환점에서 끊는다. 다만 그 지점이 목표의 70%에도
+    못 미치면 버리는 양이 너무 커서, 그 때는 목표 지점에서 그냥 자른다.
+    """
+    import numpy as np
+
+    limit = int(max_s * SAMPLE_RATE)
+    if len(a) <= limit:
+        return a
+    v = split_silence(a, thresh_db)[:limit]
+    ends = np.nonzero(v[:-1] & ~v[1:])[0] + 1  # 발화가 끝나는 지점들
+    cut = int(ends[-1]) if len(ends) and ends[-1] >= limit * 0.7 else limit
+    return a[:cut]
+
+
 def encode_prompt(audio, lang: str, model_dir: str, config: str | None):
     """Mimi 인코딩 + speaker 투영 → [1, T, 1024] audio_prompt 텐서.
 
@@ -104,8 +124,25 @@ def encode_prompt(audio, lang: str, model_dir: str, config: str | None):
     cfg, source = resolve_model(lang, model_dir, config)
     print(f"model source: {source}" + (f" ({cfg})" if cfg else ""))
     torch.set_grad_enabled(False)
-    model = TTSModel.load_model(config=cfg, quantize=False)
+    # cfg=None을 그대로 넘기면 load_model이 English로 기본 동작해 --lang이 무시된다.
+    # 그러면 gated English 대신 without-voice-cloning 가중치로 떨어지고, 그 체크포인트는
+    # Mimi 인코더가 없어 임베딩이 전부 0이 된다. synthesize.py와 같은 분기를 쓴다.
+    if cfg:
+        model = TTSModel.load_model(config=cfg, quantize=False)
+    elif lang == "ko":
+        model = TTSModel.load_model(config=KOREAN_CONFIG, quantize=False)
+    else:
+        model = TTSModel.load_model(language="english", quantize=False)
     model.eval()
+    enc_max = max(
+        float(p.float().abs().max()) for n, p in model.mimi.named_parameters() if "encoder" in n
+    )
+    if enc_max == 0.0:
+        raise SystemExit(
+            "Mimi 인코더 가중치가 비어 있어 임베딩이 0이 된다. "
+            "voice cloning이 가능한 체크포인트인지 확인할 것 "
+            "(without-voice-cloning 가중치에는 인코더가 없다)."
+        )
     with torch.no_grad():
         prompt = model._encode_audio(
             torch.from_numpy(audio).unsqueeze(0).unsqueeze(0).to(model.device)
@@ -123,9 +160,14 @@ def main() -> None:
     ap.add_argument("--max-pause", type=float, default=0.4,
                     help="trim 모드에서 내부 무음 상한(초)")
     ap.add_argument("--thresh-db", type=float, default=-40.0, help="무음 판정 임계(dBFS)")
+    ap.add_argument("--max-seconds", type=float, default=None,
+                    help="프롬프트 길이 상한(초). 생략 시 제한 없음. 5~10초 권장: "
+                         "그 이상 늘려도 화자 유사도는 포화되고 합성만 느려진다")
     ap.add_argument("--config", default=None)
     ap.add_argument("--model-dir", default="models")
     a = ap.parse_args()
+    if a.max_seconds is not None and a.max_seconds <= 0:
+        raise SystemExit(f"--max-seconds must be positive (got {a.max_seconds})")
 
     audio = read_mono_24k(a.inp)
     print(f"input: {len(audio) / SAMPLE_RATE:.2f}s @ {a.inp}")
@@ -136,6 +178,15 @@ def main() -> None:
               f" → {len(audio) / SAMPLE_RATE:.2f}s")
     else:
         print(f"keep: pauses preserved → {len(audio) / SAMPLE_RATE:.2f}s")
+
+    if a.max_seconds is not None:
+        before = len(audio) / SAMPLE_RATE
+        audio = cap_length(audio, a.max_seconds, a.thresh_db)
+        after = len(audio) / SAMPLE_RATE
+        if after < before:
+            print(f"cap: {before:.2f}s → {after:.2f}s (limit {a.max_seconds:.2f}s)")
+        else:
+            print(f"cap: already within {a.max_seconds:.2f}s, unchanged")
 
     prompt = encode_prompt(audio, a.lang, a.model_dir, a.config)
     print(f"audio_prompt: {tuple(prompt.shape)} (~{prompt.numel() * 4 / 1024:.0f}KB)")
