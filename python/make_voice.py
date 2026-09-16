@@ -8,11 +8,11 @@ Mimi 인코딩을 미리 해 두므로 합성 시작도 빨라진다.
 주의: 임베딩은 인코더 가중치에 종속되므로 만든 모델(한/영)에서만 쓴다.
 
     # 1) 원본 휴지 패턴 그대로
-    python make_voice.py --in voice_raw.wav --out voice.keep.safetensors --mode keep
+    python python/make_voice.py --in voice_raw.wav --out voice.keep.safetensors --mode keep
     # 2) 앞뒤 무음 제거 + 긴 내부 휴지 압축 (권장)
-    python make_voice.py --in voice_raw.wav --out voice.trim.safetensors --mode trim
+    python python/make_voice.py --in voice_raw.wav --out voice.trim.safetensors --mode trim
     # 3) 길이 상한까지 (5~10초 권장). 단어 중간이 아니라 휴지에서 끊는다
-    python make_voice.py --in voice_raw.wav --out voice.10s.safetensors --max-seconds 10
+    python python/make_voice.py --in voice_raw.wav --out voice.10s.safetensors --max-seconds 10
 
     cargo run --release -- --lang ko --voice voice.trim.safetensors \
       --text "안녕하세요." --out out.wav
@@ -24,7 +24,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from synthesize import KOREAN_CONFIG, resolve_model  # noqa: E402
+from synthesize import KOREAN_CONFIG, MODEL_DIR_DEFAULT, resolve_model  # noqa: E402
 
 SAMPLE_RATE = 24000
 
@@ -164,7 +164,7 @@ def main() -> None:
                     help="프롬프트 길이 상한(초). 생략 시 제한 없음. 5~10초 권장: "
                          "그 이상 늘려도 화자 유사도는 포화되고 합성만 느려진다")
     ap.add_argument("--config", default=None)
-    ap.add_argument("--model-dir", default="models")
+    ap.add_argument("--model-dir", default=MODEL_DIR_DEFAULT)
     a = ap.parse_args()
     if a.max_seconds is not None and a.max_seconds <= 0:
         raise SystemExit(f"--max-seconds must be positive (got {a.max_seconds})")

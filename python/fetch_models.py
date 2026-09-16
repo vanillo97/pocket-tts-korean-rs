@@ -4,9 +4,9 @@
 캐시에 있으면 하드링크(순간 완료, 추가 디스크 0), 없으면 다운로드 후 고정.
 마지막에 models/{ko,en}.local.yaml을 (재)생성한다.
 
-    python fetch_models.py
-    python fetch_models.py --lang ko        # 한국어만
-    python fetch_models.py --copy           # 하드링크 대신 복사 (다른 FS로 옮길 때)
+    python python/fetch_models.py
+    python python/fetch_models.py --lang ko        # 한국어만
+    python python/fetch_models.py --copy           # 하드링크 대신 복사 (다른 FS로 옮길 때)
 """
 
 import argparse
@@ -16,8 +16,8 @@ import shutil
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-MODEL_DIR = HERE / "models"
+ROOT = Path(__file__).resolve().parent.parent  # 리포 루트 (python/ 의 상위)
+MODEL_DIR = ROOT / "models"
 
 FILES = {
     "ko": [
@@ -57,7 +57,7 @@ def pin_file(src: Path, dest: Path, copy: bool) -> str:
 
 def write_local_yaml(lang: str) -> None:
     variant = lang_map(lang)
-    base = (HERE / "libs" / "pocket-tts" / "config" / f"{variant}.yaml").read_text()
+    base = (ROOT / "libs" / "pocket-tts" / "config" / f"{variant}.yaml").read_text()
     base = re.sub(r"^weights_path: .*$", f"weights_path: models/{variant}.safetensors",
                   base, flags=re.M)
     base = re.sub(r"^(\s*)tokenizer_path: .*$", rf"\1tokenizer_path: models/{variant}.tokenizer.model",

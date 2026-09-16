@@ -1,8 +1,10 @@
 """make_voice.py cap_length 자체 점검: python3 test_make_voice.py"""
 import importlib.util
+from pathlib import Path
 import numpy as np
 
-spec = importlib.util.spec_from_file_location("mv", "make_voice.py")
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location("mv", HERE / "make_voice.py")
 mv = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mv)
 SR = mv.SAMPLE_RATE

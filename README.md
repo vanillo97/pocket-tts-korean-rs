@@ -34,9 +34,12 @@ pocket-tts-essential/
     korean.safetensors / korean.tokenizer.model / korean.local.yaml
     english.safetensors / english.tokenizer.model / english.local.yaml
     alba.safetensors    # 영어 stock voice 임베딩
-  synthesize.py         # Python 최소 합성 (--lang ko|en, INT8 기본)
-  fetch_models.py       # models/ 고정 스크립트 (캐시 있으면 하드링크, 없으면 다운로드)
-  requirements.txt      # pocket-tts==3.1.0, torch, scipy
+  python/               # Python 도구 모음 (리포 루트 기준으로 models/ 를 찾는다)
+    synthesize.py       # Python 최소 합성 (--lang ko|en, INT8 기본)
+    make_voice.py       # 화자 wav → 임베딩(.safetensors), --max-seconds 로 길이 상한
+    fetch_models.py     # models/ 고정 스크립트 (캐시 있으면 하드링크, 없으면 다운로드)
+    requirements.txt    # pocket-tts==3.1.0, torch, scipy
+    test_speed.py / test_make_voice.py   # 자체 점검
 ```
 
 ## 모델 자동 선택 (로컬 우선, 없으면 다운로드)
@@ -46,13 +49,13 @@ pocket-tts-essential/
 stock voice도 `models/{이름}.safetensors` 우선. 실행 시 `model source:`로 표시.
 
 ```bash
-python synthesize.py --lang ko --voice voice.wav --text "안녕하세요." --out out.wav
+python python/synthesize.py --lang ko --voice voice.wav --text "안녕하세요." --out out.wav
 # model source: local (models/korean.local.yaml)   ← 로컬 있음
 # model source: download                            ← 로컬 없음, HF 자동 다운로드
 
 # 새 머신에서 models/ 미리 받기 (이 폴더에서 실행)
-python fetch_models.py            # 한+영 전체
-python fetch_models.py --lang ko  # 한국어만
+python python/fetch_models.py            # 한+영 전체
+python python/fetch_models.py --lang ko  # 한국어만
 ```
 
 ## 로컬 모델로 오프라인 실행
@@ -61,9 +64,9 @@ python fetch_models.py --lang ko  # 한국어만
 
 ```bash
 # Python (HF_HUB_OFFLINE=1: 네트워크 접근 시도시 에러 → 오프라인 보증)
-HF_HUB_OFFLINE=1 python synthesize.py --lang ko --config models/korean.local.yaml \
+HF_HUB_OFFLINE=1 python python/synthesize.py --lang ko --config models/korean.local.yaml \
   --voice voice.wav --text "안녕하세요." --out out.wav
-HF_HUB_OFFLINE=1 python synthesize.py --lang en --config models/english.local.yaml \
+HF_HUB_OFFLINE=1 python python/synthesize.py --lang en --config models/english.local.yaml \
   --voice models/alba.safetensors --text "Hello world!" --out out_en.wav
 
 # Rust (로컬 경로는 다운로드를 타지 않음 — 소스상 확정)
@@ -93,9 +96,9 @@ wav를 `--voice`용 `.safetensors`(`audio_prompt` 잠재)로 변환한다.
 
 ```bash
 # 1) 원본 휴지 패턴 그대로
-python make_voice.py --in voice_raw.wav --out voice.keep.safetensors --mode keep
+python python/make_voice.py --in voice_raw.wav --out voice.keep.safetensors --mode keep
 # 2) 앞뒤 무음 제거 + 긴 내부 휴지 압축 (권장, --max-pause 초 단위)
-python make_voice.py --in voice_raw.wav --out voice.trim.safetensors --mode trim
+python python/make_voice.py --in voice_raw.wav --out voice.trim.safetensors --mode trim
 cargo run --release -- --lang ko --voice voice.trim.safetensors \
   --text "안녕하세요." --out out.wav
 ```
@@ -103,12 +106,12 @@ cargo run --release -- --lang ko --voice voice.trim.safetensors \
 ### A. Python (가장 빠름, 권장)
 
 ```bash
-pip install -r requirements.txt
+pip install -r python/requirements.txt
 # 한국어
-python synthesize.py --lang ko --voice voice.wav \
+python python/synthesize.py --lang ko --voice voice.wav \
   --text "안녕하세요. 한국어 음성 합성 모델입니다." --out out.wav
 # 영어 (gated면 export HF_TOKEN 필요)
-python synthesize.py --lang en --voice alba \
+python python/synthesize.py --lang en --voice alba \
   --text "Hello world!" --out out_en.wav
 # FP32가 필요하면: --no-quant
 ```

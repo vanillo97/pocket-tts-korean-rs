@@ -1,8 +1,10 @@
 """synthesize.py apply_speed 자체 점검: python3 test_speed.py"""
 import importlib.util
+from pathlib import Path
 import numpy as np
 
-spec = importlib.util.spec_from_file_location("s", "synthesize.py")
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location("s", HERE / "synthesize.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 

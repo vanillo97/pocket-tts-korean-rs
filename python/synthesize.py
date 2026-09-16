@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""synthesize.py — 한/영 합성 최소 코드 (제품용).
+"""synthesize.py — 한/영 합성 최소 코드.
 
-    pip install -r requirements.txt
-    python synthesize.py --lang ko --voice voice.wav \
+    pip install -r python/requirements.txt
+    python python/synthesize.py --lang ko --voice voice.wav \
         --text "안녕하세요. 한국어 음성 합성 모델입니다." --out out.wav
-    python synthesize.py --lang en --voice alba \
+    python python/synthesize.py --lang en --voice alba \
         --text "Hello world!" --out out_en.wav
 """
 
@@ -14,7 +14,9 @@ import time
 from pathlib import Path
 
 KOREAN_CONFIG = "hf://seastar105/pocket-tts-korean-300m/korean.yaml"
-MODEL_DIR_DEFAULT = "models"
+ROOT = Path(__file__).resolve().parent.parent  # 리포 루트 (python/ 의 상위)
+# CWD 가 아니라 리포 루트 기준. python/ 안에서 실행해도 동작한다.
+MODEL_DIR_DEFAULT = str(ROOT / "models")
 SAMPLE_RATE = 24000
 # 신모델 per-language 임베딩 (pip 3.1.0 get_predefined_voice와 동일).
 ENGLISH_VOICE_REPO = "kyutai/pocket-tts-without-voice-cloning"
