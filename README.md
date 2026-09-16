@@ -137,7 +137,7 @@ let secs = pocket_tts_essential::synthesize_to_wav(&model, "alba", "Hello world!
 - 입력 10초 분량 초과 시 `ScatterElementsUpdate` 실패 → 문장 단위로 나눠서 호출.
 - `ctx 256 / mimi 128 latents` 한도.
 - `--voice`: stock 이름(영어 8종), `.wav`(Mimi 인코딩), `.safetensors`(임베딩) 지원.
-- 말 빠르기는 `--speed 1.3` (0.5~2.0, 피치 유지 타임스트레치. 합성 후 후처리라 생성 시간은 동일).
+- `--speed`: 재생 속도 배율 (1.0 원본, 0.5~2.0). 피치 보존 후처리라 재추론 없음.
 - 중간에 끊기면 `--eos-debounce 3` → `--extra-frames 20` → `--seed` 변경 순으로 시도.
   그래도 안 되면 화자 wav 구간을 바꿀 것 (휴지가 긴 구간은 false EOS 유발).
 - 본인 동의 음성만 사용. 출력 24kHz wav.

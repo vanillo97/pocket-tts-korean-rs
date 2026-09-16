@@ -15,6 +15,7 @@ from pathlib import Path
 
 KOREAN_CONFIG = "hf://seastar105/pocket-tts-korean-300m/korean.yaml"
 MODEL_DIR_DEFAULT = "models"
+SAMPLE_RATE = 24000
 # 신모델 per-language 임베딩 (pip 3.1.0 get_predefined_voice와 동일).
 ENGLISH_VOICE_REPO = "kyutai/pocket-tts-without-voice-cloning"
 ENGLISH_VOICE_PREFIX = "languages/english/embeddings"
@@ -80,8 +81,72 @@ def resolve_voice(lang: str, voice: str | None, model_dir: str = MODEL_DIR_DEFAU
     return "voice.wav"
 
 
+def apply_speed(audio, speed: float = 1.0, sample_rate: int = SAMPLE_RATE):
+    """재생 속도 조절 (피치 보존 WSOLA). Rust `apply_speed`와 동일 알고리즘.
+    audio: 1D numpy 배열. 출력 길이 = round(입력 길이 / speed). 범위 0.5~2.0."""
+    import numpy as np
+
+    a = np.asarray(audio, dtype=np.float32).ravel()
+    if abs(speed - 1.0) < 1e-6:
+        return a
+    if not 0.5 <= speed <= 2.0:
+        raise ValueError(f"speed must be in 0.5..=2.0, got {speed}")
+    n = a.size
+    target = max(1, round(n / speed))
+
+    def _linear():  # 짧은 입력 폴백 (피치 변하지만 길이가 무시 가능)
+        pos = np.arange(target) * speed
+        i0 = np.floor(pos).astype(int).clip(0, n - 1)
+        i1 = np.minimum(i0 + 1, n - 1)
+        return (a[i0] * (1 - (pos - i0)) + a[i1] * (pos - i0)).astype(np.float32)
+
+    if n < 2048:
+        return _linear()
+    sr = max(1000, int(sample_rate))
+    win = max(64, sr * 30 // 1000)   # 분석창 30ms
+    hop = win // 2                    # 출력 홉 (50% 겹침)
+    tol = max(8, sr * 10 // 1000)     # 정합 탐색 ±10ms
+    if n < win + 2 * tol + hop:
+        return _linear()
+
+    w = (0.5 - 0.5 * np.cos(2 * np.pi * np.arange(win) / win)).astype(np.float64)
+    out = np.zeros(target + win, dtype=np.float64)
+    wsum = np.zeros(target + win, dtype=np.float64)
+    # 창 에너지를 누적합으로 O(1) 조회 (정규화 상관의 분모)
+    csum = np.concatenate([[0.0], np.cumsum(a.astype(np.float64) ** 2)])
+    prev_next = 0
+    k = 0
+    while True:
+        out_pos = k * hop
+        nominal = int(out_pos * speed)
+        # 공칭 위치는 항상 speed 배로만 전진한다. 정합 위치를 되먹이면 드리프트가
+        # 누적되어 길이가 틀어진다.
+        if out_pos + win > out.size or nominal + win + tol + hop >= n:
+            break
+        if k == 0:
+            src = nominal
+        else:
+            tmpl = a[prev_next:prev_next + win].astype(np.float64)
+            lo, hi = max(0, nominal - tol), min(n - win, nominal + tol)
+            cand = np.lib.stride_tricks.sliding_window_view(a[lo:hi + win], win)[:hi - lo + 1]
+            e = np.sqrt(csum[lo + win:hi + win + 1] - csum[lo:hi + 1])
+            src = lo + int(np.argmax(cand @ tmpl / (e + 1e-9)))
+        out[out_pos:out_pos + win] += a[src:src + win] * w
+        wsum[out_pos:out_pos + win] += w
+        prev_next = src + hop
+        k += 1
+
+    nz = wsum > 1e-3
+    out[nz] /= wsum[nz]
+    out = out[:target]
+    if out.size < target:
+        out = np.pad(out, (0, target - out.size))
+    return out.astype(np.float32)
+
+
 def synthesize(lang: str, text: str, voice: str, out: str, threads: int = 8,
-               quantize: bool = True, seed: int = 0, config: str | None = None) -> dict:
+               quantize: bool = True, seed: int = 0, config: str | None = None,
+               speed: float = 1.0) -> dict:
     import torch
     import scipy.io.wavfile
     from pocket_tts import TTSModel
@@ -105,8 +170,10 @@ def synthesize(lang: str, text: str, voice: str, out: str, threads: int = 8,
     audio = model.generate_audio(vs, text, copy_state=True)
     gen = time.perf_counter() - t0
 
-    secs = audio.numel() / sr
-    scipy.io.wavfile.write(out, sr, audio.detach().cpu().numpy())
+    wav = audio.detach().cpu().float().numpy().ravel()
+    wav = apply_speed(wav, speed, sr)
+    secs = wav.size / sr
+    scipy.io.wavfile.write(out, sr, wav)
     return {"out": out, "audio_s": round(secs, 2), "gen_s": round(gen, 3),
             "speed_x": round(secs / gen, 2), "rtf": round(gen / secs, 4)}
 
@@ -125,6 +192,8 @@ def main() -> None:
                     help="커스텀 yaml (로컬 경로 또는 hf:// URL). 지정 시 자동 선택 대신 사용")
     ap.add_argument("--model-dir", default=MODEL_DIR_DEFAULT,
                     help="로컬 모델 폴더 (default: models). 없으면 HF 자동 다운로드")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="재생 속도 배율 (1.0 원본, >1 빠름, <1 느림; 피치 보존, 0.5~2.0)")
     a = ap.parse_args()
 
     config, source = resolve_model(a.lang, a.model_dir, a.config)
@@ -134,7 +203,7 @@ def main() -> None:
         raise SystemExit(f"voice not found: {voice}")
     r = synthesize(a.lang, a.text or DEFAULT_TEXT[a.lang], voice, a.out,
                    threads=a.threads, quantize=not a.no_quant, seed=a.seed,
-                   config=config)
+                   config=config, speed=a.speed)
     print(f"saved {r['out']} ({r['audio_s']}s audio, gen {r['gen_s']}s, "
           f"{r['speed_x']}x, RTF {r['rtf']})")
 

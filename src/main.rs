@@ -64,18 +64,13 @@ struct Args {
     /// 연속 EOS 필요 횟수 (단발성 오검출 무시, 기본 1)
     #[arg(long, default_value_t = 1)]
     eos_debounce: usize,
-    /// 말 빠르기 (0.5~2.0, 피치 유지, 1.0=원본, 1.5=빠르게)
+    /// 재생 속도 배율 (1.0 원본, >1 빠름, <1 느림; 피치 보존, 범위 0.5~2.0)
     #[arg(long, default_value_t = 1.0)]
     speed: f32,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    anyhow::ensure!(
-        (0.5..=2.0).contains(&args.speed),
-        "--speed must be in 0.5..=2.0 (got {})",
-        args.speed
-    );
     set_threads(args.threads);
 
     let (default_text, default_voice) = match args.lang {
@@ -129,10 +124,16 @@ fn main() -> Result<()> {
     model.seed = Some(args.seed);
     model.extra_frames = args.extra_frames;
     model.eos_debounce = args.eos_debounce;
-    model.speed = args.speed;
     // voice 인코딩은 타이머 밖(웜 상태 가정). 벤치 프로토콜과 동일.
-    let secs = synthesize_to_wav_in(&model, voice, text, &args.out, Some(&args.model_dir))
-        .with_context(|| format!("합성 실패 (voice='{}')", voice))?;
+    let secs = synthesize_to_wav_in(
+        &model,
+        voice,
+        text,
+        &args.out,
+        Some(&args.model_dir),
+        args.speed,
+    )
+    .with_context(|| format!("합성 실패 (voice='{}')", voice))?;
     let gen = t0.elapsed().as_secs_f32();
 
     println!(
